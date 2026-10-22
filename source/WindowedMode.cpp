@@ -7,6 +7,44 @@
 #pragma comment(lib, "dwmapi.lib") // DwmGetWindowAttribute
 #pragma comment(lib, "winmm.lib") // timeGetTime
 
+// SA:MP 0.3.7-R1 chat-input state, as documented by SAMP-API.
+// Unlike guessing from T/F6 key messages, this also works when another ASI
+// consumes the chat-opening key before WindowedMode's window procedure.
+// Only support R1 here: other SA:MP revisions have different layouts.
+namespace {
+    constexpr uintptr_t kSampR1InputPtrOffset = 0x21A0E8;
+    // CInput: 3 pointers + 144 command handlers + 144 command names (33 bytes)
+    // + command count => m_bEnabled (BOOL) at offset 0x14E0.
+    constexpr uintptr_t kSampR1ChatEnabledOffset = 0x14E0;
+
+    bool IsSampR1ChatInputEnabled()
+    {
+        auto samp = GetModuleHandleA("samp.dll");
+        if (!samp) return false;
+
+        // ReadProcessMemory against this process safely rejects unreadable
+        // addresses (e.g. before SA:MP has initialized its input object).
+        // Avoid direct pointer dereferences that could crash in an ASI hook.
+        HANDLE process = GetCurrentProcess();
+        SIZE_T bytesRead = 0;
+        uintptr_t input = 0;
+        auto ptrAddress = reinterpret_cast<LPCVOID>(
+            reinterpret_cast<uintptr_t>(samp) + kSampR1InputPtrOffset);
+        if (!ReadProcessMemory(process, ptrAddress, &input, sizeof(input), &bytesRead) ||
+            bytesRead != sizeof(input) || input < 0x10000)
+            return false;
+
+        BOOL enabled = FALSE;
+        bytesRead = 0;
+        if (!ReadProcessMemory(process,
+                reinterpret_cast<LPCVOID>(input + kSampR1ChatEnabledOffset),
+                &enabled, sizeof(enabled), &bytesRead) ||
+            bytesRead != sizeof(enabled))
+            return false;
+        return enabled == TRUE;
+    }
+}
+
 // list of popular display aspect ratios
 const WindowedMode::AspectRatioInfo WindowedMode::AspectRatios[] = {
 	{ "1:1", 1.0f / 1.0f },
@@ -153,6 +191,8 @@ bool WindowedMode::LoadConfig()
 	autoResume = config.ReadInteger("game", "autoResume", true) != false;
 	releaseCursorInChat = config.ReadInteger("game", "releaseCursorInChat", 1) != 0;
 	disableMouseClipping = config.ReadInteger("game", "disableMouseClipping", 0) != 0;
+	if (gameTitle == GameTitle::GTA_SA)
+		OutputDebugStringA("WM22_SAMP_R1_REAL_CHAT_STATE_CURSOR_V3");
 
 	return maximize;
 }
@@ -169,8 +209,8 @@ void WindowedMode::SaveConfig()
 	
 	config.WriteString("game", "autoPause",		StringPrintf("%d\t\t; pause the game on window deactivation", autoPause));
 	config.WriteString("game", "autoResume",	StringPrintf("%d\t; resume the game on window activation", autoResume));
-	config.WriteString("game", "releaseCursorInChat", StringPrintf("%d\t; SA:MP T/F6 chat releases cursor lock", releaseCursorInChat));
-	config.WriteString("game", "disableMouseClipping", StringPrintf("%d\t; diagnostic: never clip cursor to GTA", disableMouseClipping));
+	config.WriteString("game", "releaseCursorInChat", StringPrintf("%d\t; SA:MP 0.3.7-R1 chat unlocks cursor (T/F6)", releaseCursorInChat));
+	config.WriteString("game", "disableMouseClipping", StringPrintf("%d\t; 0 = clip cursor during gameplay, 1 = unclip always", disableMouseClipping));
 }
 
 int WindowedMode::FindAspectRatio(POINT resolution, float treshold)
@@ -562,28 +602,8 @@ LRESULT APIENTRY WindowedMode::WindowProc(HWND wnd, UINT msg, WPARAM wParam, LPA
 			if (!HasFocus(wnd))
 				return DefWindowProc(wnd, msg, wParam, lParam); // bypass the game
 
-			// SA:MP's chat starts with T or F6 and closes with Enter or Esc.
-			// Track just that state; never patch SA:MP memory or hook DirectInput.
-			// Ignore autorepeat and shortcuts like Ctrl+T.
-			if (msg == WM_KEYDOWN && inst->gameTitle == GameTitle::GTA_SA &&
-				inst->releaseCursorInChat && GetModuleHandleA("samp.dll") &&
-				!(lParam & (1L << 30)))
-			{
-				if (inst->chatInputActive &&
-					(wParam == VK_ESCAPE || wParam == VK_RETURN))
-				{
-					inst->chatInputActive = false;
-					inst->MouseUpdate(true);
-				}
-				else if (!inst->chatInputActive &&
-					(wParam == 'T' || wParam == VK_F6) &&
-					!(GetKeyState(VK_CONTROL) & 0x8000) &&
-					!(GetKeyState(VK_MENU) & 0x8000))
-				{
-					inst->chatInputActive = true;
-					inst->MouseUpdate(true);
-				}
-			}
+			// SA:MP chat state is read from CInput in MouseUpdate().
+			// Do not infer it from key messages: _chat.asi may consume those.
 
 			// handle Alt+Enter and Ctrl+Enter key combinations
 			const bool alt = (lParam & (1L << 29)) != 0;
@@ -974,22 +994,27 @@ void WindowedMode::MouseUpdate(bool force)
 	ClientToScreen(window, (LPPOINT)&rect.left);
 	ClientToScreen(window, (LPPOINT)&rect.right);
 
-	// cursor visibility
-	bool inGame = hasFocus && PtInRect(&rect, pos);
-	SetCursorVisible(!inGame);
+	// Poll the actual SA:MP 0.3.7-R1 chat-input state each frame.
+	// When chat closes, the cursor is clipped again automatically.
+	// No unrestricted mouse while driving/running around.
+	const bool releaseForChat = gameTitle == GameTitle::GTA_SA &&
+		releaseCursorInChat && IsSampR1ChatInputEnabled();
 
-	// The stock 2.2 plugin re-applies ClipCursor(&rect) every frame.
-	// That undoes any Lua/SA:MP chat script which unlocks the mouse.
-	// Release the clip only while chat is open (or in diagnostic mode).
+	// Keep cursor visible while SA:MP chat is open, even when the
+	// pointer remains over GTA's client area.
+	const bool inGame = hasFocus && PtInRect(&rect, pos);
+	SetCursorVisible(!inGame || releaseForChat);
+
+	// Normal gameplay: clip to GTA. SA:MP chat: unclip for monitor 2.
+	// The diagnostic override is intentionally OFF for this behavior.
 	if (hasFocus || force)
 	{
-		const bool releaseForChat = gameTitle == GameTitle::GTA_SA &&
-			releaseCursorInChat && chatInputActive;
 		if (!hasFocus || IsMainMenuVisible() || releaseForChat || disableMouseClipping)
 			ClipCursor(NULL);
 		else
 			ClipCursor(&rect);
 	}
+
 }
 
 void WindowedMode::UpdatePostEffect()
