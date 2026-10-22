@@ -1,0 +1,77 @@
+name: Build WindowedMode ASI - verified Win32
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'source/**'
+      - 'premake5.lua'
+      - '.github/workflows/build-asi.yml'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Check required source files exist
+        shell: pwsh
+        run: |
+          $required = @('premake5.exe', 'premake5.lua', 'source/dllmain.cpp', 'source/WindowedMode.cpp', 'source/Windowed_GtaSA.h')
+          foreach ($p in $required) {
+            if (-not (Test-Path $p)) { throw "MISSING: $p. Upload extracted source at the repository root (not inside a nested folder)." }
+          }
+          $s = Get-Content 'source/WindowedMode.cpp' -Raw
+          if (-not $s.Contains('releaseCursorInChat')) { throw 'Wrong source: the patched WindowedMode.cpp is missing releaseCursorInChat.' }
+
+      - name: Fetch dependencies
+        shell: pwsh
+        run: |
+          git clone https://github.com/ThirteenAG/IniReader.git external/IniReader
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to clone IniReader' }
+          git clone --recursive https://github.com/ThirteenAG/injector.git external/injector
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to clone injector' }
+
+      - name: Generate Visual Studio project
+        shell: pwsh
+        run: |
+          .\premake5.exe vs2022
+          if ($LASTEXITCODE -ne 0) { throw 'Premake failed' }
+          $project = Get-ChildItem build -Filter '*.vcxproj' -Recurse | Select-Object -First 1
+          if (-not $project) { throw 'No vcxproj generated' }
+          $xml = Get-Content $project.FullName -Raw
+          if ($xml -notmatch 'WindowedMode.cpp' -or $xml -notmatch 'dllmain.cpp') {
+            throw 'Project does not include WindowedMode.cpp and dllmain.cpp; refusing to create an empty ASI.'
+          }
+          Write-Host "Verified source files are included in $($project.FullName)"
+
+      - name: Set up MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Compile Release Win32 ASI
+        shell: pwsh
+        run: |
+          msbuild 'build/III.VC.SA.WindowedMode.sln' /m /p:Configuration=Release /p:Platform=Win32
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
+
+      - name: Verify binary contains WindowedMode code
+        shell: pwsh
+        run: |
+          $asi = 'data/III.VC.SA.WindowedMode.asi'
+          if (-not (Test-Path $asi)) { throw 'The ASI output file is missing' }
+          $bytes = [IO.File]::ReadAllBytes((Resolve-Path $asi))
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          foreach ($marker in @('releaseCursorInChat', 'disableMouseClipping', 'GTA SA 1.0.0.0 US')) {
+            if (-not $ascii.Contains($marker)) { throw "Invalid ASI: missing compiled code marker '$marker'" }
+          }
+          if (-not $ascii.Contains('USER32.dll')) { throw 'Invalid ASI: USER32.dll is not imported. The actual mouse/window code is likely absent.' }
+          Write-Host "PASS: $asi contains WindowedMode code and USER32 imports."
+          Get-Item $asi | Select-Object Name, Length
+
+      - name: Upload verified ASI
+        uses: actions/upload-artifact@v4
+        with:
+          name: WindowedMode-MouseEscape-verified-Win32
+          path: data/III.VC.SA.WindowedMode.asi
+          if-no-files-found: error
