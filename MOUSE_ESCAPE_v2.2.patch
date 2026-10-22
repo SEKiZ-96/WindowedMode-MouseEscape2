@@ -1,0 +1,84 @@
+--- a/source/WindowedMode.h
++++ b/source/WindowedMode.h
+@@ -114,6 +114,12 @@
+ 	bool autoResume = true;
+ 	bool autoPauseExecuted = false;
+ 
++	// SA:MP chat cursor support. Unlike the stock 2.2 MouseUpdate, do not
++	// re-clip the cursor every frame while the chat input is active.
++	bool releaseCursorInChat = true;
++	bool disableMouseClipping = false; // diagnostic fallback; disabled by default
++	bool chatInputActive = false;
++
+ 	bool IsMainMenuVisible() const;
+ 	void SwitchMainMenu(bool show);
+ 	
+--- a/source/WindowedMode.cpp
++++ b/source/WindowedMode.cpp
+@@ -151,6 +151,8 @@
+ 	
+ 	autoPause = config.ReadInteger("game", "autoPause", true) != false;
+ 	autoResume = config.ReadInteger("game", "autoResume", true) != false;
++	releaseCursorInChat = config.ReadInteger("game", "releaseCursorInChat", 1) != 0;
++	disableMouseClipping = config.ReadInteger("game", "disableMouseClipping", 0) != 0;
+ 
+ 	return maximize;
+ }
+@@ -167,6 +169,8 @@
+ 	
+ 	config.WriteString("game", "autoPause",		StringPrintf("%d\t\t; pause the game on window deactivation", autoPause));
+ 	config.WriteString("game", "autoResume",	StringPrintf("%d\t; resume the game on window activation", autoResume));
++	config.WriteString("game", "releaseCursorInChat", StringPrintf("%d\t; SA:MP T/F6 chat releases cursor lock", releaseCursorInChat));
++	config.WriteString("game", "disableMouseClipping", StringPrintf("%d\t; diagnostic: never clip cursor to GTA", disableMouseClipping));
+ }
+ 
+ int WindowedMode::FindAspectRatio(POINT resolution, float treshold)
+@@ -557,7 +561,30 @@
+ 		{
+ 			if (!HasFocus(wnd))
+ 				return DefWindowProc(wnd, msg, wParam, lParam); // bypass the game
+-			
++
++			// SA:MP's chat starts with T or F6 and closes with Enter or Esc.
++			// Track just that state; never patch SA:MP memory or hook DirectInput.
++			// Ignore autorepeat and shortcuts like Ctrl+T.
++			if (msg == WM_KEYDOWN && inst->gameTitle == GameTitle::GTA_SA &&
++				inst->releaseCursorInChat && GetModuleHandleA("samp.dll") &&
++				!(lParam & (1L << 30)))
++			{
++				if (inst->chatInputActive &&
++					(wParam == VK_ESCAPE || wParam == VK_RETURN))
++				{
++					inst->chatInputActive = false;
++					inst->MouseUpdate(true);
++				}
++				else if (!inst->chatInputActive &&
++					(wParam == 'T' || wParam == VK_F6) &&
++					!(GetKeyState(VK_CONTROL) & 0x8000) &&
++					!(GetKeyState(VK_MENU) & 0x8000))
++				{
++					inst->chatInputActive = true;
++					inst->MouseUpdate(true);
++				}
++			}
++
+ 			// handle Alt+Enter and Ctrl+Enter key combinations
+ 			const bool alt = (lParam & (1L << 29)) != 0;
+ 			const bool control = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+@@ -951,10 +978,14 @@
+ 	bool inGame = hasFocus && PtInRect(&rect, pos);
+ 	SetCursorVisible(!inGame);
+ 
+-	// keep cursor inside the window
++	// The stock 2.2 plugin re-applies ClipCursor(&rect) every frame.
++	// That undoes any Lua/SA:MP chat script which unlocks the mouse.
++	// Release the clip only while chat is open (or in diagnostic mode).
+ 	if (hasFocus || force)
+ 	{
+-		if (!hasFocus || IsMainMenuVisible())
++		const bool releaseForChat = gameTitle == GameTitle::GTA_SA &&
++			releaseCursorInChat && chatInputActive;
++		if (!hasFocus || IsMainMenuVisible() || releaseForChat || disableMouseClipping)
+ 			ClipCursor(NULL);
+ 		else
+ 			ClipCursor(&rect);

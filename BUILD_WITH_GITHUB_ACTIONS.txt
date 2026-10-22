@@ -1,0 +1,24 @@
+Build patched III.VC.SA.WindowedMode.asi on GitHub's Windows runner
+=====================================================================
+
+This package contains patched source code and a GitHub Actions build workflow.
+It does NOT contain a compiled ASI. This workflow has NOT been run or tested.
+
+1. Create a new PRIVATE GitHub repository (to avoid unintentionally publishing your modpack-related files).
+2. Extract this ZIP, then upload ALL its contents to the repository, including
+   the hidden .github/workflows/build-asi.yml file. GitHub's web uploader may hide dotfolders;
+   use Git on your PC if it does.
+3. Open the repository Actions tab and select "Build patched WindowedMode ASI (Win32)".
+   Choose "Run workflow". A push to the source files can also trigger the workflow.
+4. If the build succeeds, open that workflow run and download the artifact named
+   WindowedMode-2.2-MouseEscape-Win32. It should contain III.VC.SA.WindowedMode.asi.
+5. If the build fails, read the compiler error output. The ZIP lacks pinned
+   submodules, so GitHub's current Injector or IniReader sources may be incompatible.
+
+SAFETY:
+- The C++ modification is experimental and has not been verified inside SA:MP.
+- Back up your currently working ASI and config, and test only in a separate copy.
+- Never install two WindowedMode versions together.
+- New INI options are documented in README_MOUSE_ESCAPE.md.
+
+This CI workflow does not guarantee a successful build or cursor escape.
